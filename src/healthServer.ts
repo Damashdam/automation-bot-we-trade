@@ -84,6 +84,8 @@ function handleSessionUpload(req: http.IncomingMessage, res: http.ServerResponse
     settled = true;
     try {
       logger.info('WA session upload received', { bytes: size });
+      // Keep archive on volume so next boots can restore even if LocalAuth folder is wiped
+      fs.copyFileSync(tmp, path.join(DATA_DIR, 'wa-session.tar.gz'));
       restoreSessionFromTarGz(tmp);
       try {
         fs.unlinkSync(tmp);
@@ -91,8 +93,15 @@ function handleSessionUpload(req: http.IncomingMessage, res: http.ServerResponse
         /* ignore */
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, message: 'Session saved — process will restart', bytes: size }));
-      logger.info('WA session uploaded via /wa-session-upload — exiting for clean re-init');
+      res.end(
+        JSON.stringify({
+          ok: true,
+          message: 'Session saved on volume — process will restart',
+          bytes: size,
+          dataDir: DATA_DIR,
+        }),
+      );
+      logger.info('WA session uploaded — kept wa-session.tar.gz on DATA_DIR, exiting for re-init');
       setTimeout(() => process.exit(0), 500);
     } catch (err) {
       logger.error('WA session upload extract failed', { error: (err as Error).message });

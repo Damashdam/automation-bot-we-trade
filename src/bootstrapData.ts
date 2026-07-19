@@ -3,7 +3,13 @@ import path from 'path';
 import https from 'https';
 import http from 'http';
 import logger from './utils/logger';
-import { DATA_DIR, SESSION_MARKER, restoreSessionFromTarGz } from './whatsapp/sessionArchive';
+import {
+  DATA_DIR,
+  SESSION_MARKER,
+  SESSION_ARCHIVE,
+  restoreSessionFromTarGz,
+  logDataDirStatus,
+} from './whatsapp/sessionArchive';
 
 function downloadFile(url: string, dest: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -88,7 +94,21 @@ export async function bootstrapDataFromEnv(): Promise<void> {
     }
   } else if (!fs.existsSync(cookiesPath)) {
     logger.warn('No x-cookies.json yet — set X_COOKIES_BASE64 in Railway or upload the file to /app/data');
+  } else {
+    logger.info('x-cookies.json already present on volume');
   }
 
   await bootstrapWaSessionFromUrl();
+
+  // Archive on volume is source of truth after npm run wa:push-session
+  if (fs.existsSync(SESSION_ARCHIVE)) {
+    try {
+      logger.info('Restoring WhatsApp session from wa-session.tar.gz on volume');
+      restoreSessionFromTarGz(SESSION_ARCHIVE);
+    } catch (err) {
+      logger.error('Failed to restore wa-session.tar.gz', { error: (err as Error).message });
+    }
+  }
+
+  logDataDirStatus();
 }
