@@ -1,23 +1,14 @@
 /**
  * Pack local Chrome-linked WhatsApp session and upload to Railway.
  *
- * Prereq: local session works (WA_HEADLESS=false npm run wa:test once).
- * Railway: set WA_UPLOAD_TOKEN to any long secret.
- *
  * Usage:
- *   WA_BOT_URL=https://automation-bot-we-trade-production.up.railway.app \
- *   WA_UPLOAD_TOKEN=your-secret \
- *   npm run wa:push-session
+ *   WA_UPLOAD_TOKEN=your-secret npm run wa:push-session
  */
 import 'dotenv/config';
-import { execSync } from 'child_process';
 import fs from 'fs';
-import path from 'path';
 import https from 'https';
 import http from 'http';
-import { DATA_DIR, SESSION_MARKER } from './sessionArchive';
-
-const OUT = path.join(DATA_DIR, 'wa-session.tar.gz');
+import { packSessionToTarGz, SESSION_ARCHIVE, SESSION_MARKER } from './sessionArchive';
 
 function pack(): void {
   if (!fs.existsSync(SESSION_MARKER)) {
@@ -27,24 +18,15 @@ function pack(): void {
     process.exit(1);
   }
 
-  const excludes = [
-    '--exclude=**/Cache',
-    '--exclude=**/Code Cache',
-    '--exclude=**/GPUCache',
-    '--exclude=**/Service Worker',
-    '--exclude=**/blob_storage',
-    '--exclude=**/GraphiteDawnCache',
-    '--exclude=**/BrowserMetrics*',
-    '--exclude=**/Crashpad',
-  ].join(' ');
-
-  execSync(`tar ${excludes} -czf "${OUT}" -C "${DATA_DIR}" wa-session`, { stdio: 'inherit' });
-  console.log(`Packed ${OUT} (${(fs.statSync(OUT).size / 1024 / 1024).toFixed(1)} MB)`);
+  packSessionToTarGz(SESSION_ARCHIVE);
+  console.log(
+    `Packed ${SESSION_ARCHIVE} (${(fs.statSync(SESSION_ARCHIVE).size / 1024 / 1024).toFixed(1)} MB)`,
+  );
 }
 
 function upload(urlBase: string, token: string): Promise<void> {
   const target = new URL('/wa-session-upload', urlBase.replace(/\/$/, ''));
-  const body = fs.readFileSync(OUT);
+  const body = fs.readFileSync(SESSION_ARCHIVE);
   const lib = target.protocol === 'https:' ? https : http;
 
   return new Promise((resolve, reject) => {
