@@ -13,6 +13,7 @@
     "auth": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' ts-node src/scraper/auth.ts",
     "wa:test": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' ts-node src/whatsapp/testSend.ts",
     "wa:pack-session": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' ts-node src/whatsapp/exportSession.ts",
+    "wa:push-session": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' ts-node src/whatsapp/pushSession.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {

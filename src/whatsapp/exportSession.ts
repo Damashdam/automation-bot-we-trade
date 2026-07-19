@@ -8,15 +8,14 @@ import 'dotenv/config';
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { DATA_DIR, SESSION_MARKER } from './sessionArchive';
 
-const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(process.cwd(), 'data'));
-const SESSION_DIR = path.join(DATA_DIR, 'wa-session');
 const OUT = path.join(DATA_DIR, 'wa-session.tar.gz');
 
 function main(): void {
-  if (!fs.existsSync(path.join(SESSION_DIR, 'session'))) {
-    console.error('No local session at', SESSION_DIR);
-    console.error('Run locally first: WA_HEADLESS=false npm run wa:test  — scan the Chrome window QR once.');
+  if (!fs.existsSync(SESSION_MARKER)) {
+    console.error('No local session. Link once with Chrome window:');
+    console.error('  WA_HEADLESS=false npm run wa:test');
     process.exit(1);
   }
 

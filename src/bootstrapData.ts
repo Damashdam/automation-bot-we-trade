@@ -1,13 +1,9 @@
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
 import https from 'https';
 import http from 'http';
 import logger from './utils/logger';
-
-const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(process.cwd(), 'data'));
-const SESSION_DIR = path.join(DATA_DIR, 'wa-session');
-const SESSION_MARKER = path.join(SESSION_DIR, 'session');
+import { DATA_DIR, SESSION_MARKER, restoreSessionFromTarGz } from './whatsapp/sessionArchive';
 
 function downloadFile(url: string, dest: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -54,15 +50,7 @@ async function bootstrapWaSessionFromUrl(): Promise<void> {
   try {
     logger.info('Downloading WhatsApp session from WA_SESSION_URL…');
     await downloadFile(url, tmp);
-    if (force && fs.existsSync(SESSION_DIR)) {
-      fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-    }
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    execSync(`tar -xzf "${tmp}" -C "${DATA_DIR}"`, { stdio: 'pipe' });
-    if (!fs.existsSync(SESSION_MARKER)) {
-      throw new Error('Archive did not contain wa-session/session');
-    }
-    logger.info('WhatsApp session restored from WA_SESSION_URL');
+    restoreSessionFromTarGz(tmp);
   } catch (err) {
     logger.error('Failed to bootstrap WA session from URL', {
       error: (err as Error).message,
