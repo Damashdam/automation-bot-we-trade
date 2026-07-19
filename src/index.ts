@@ -4,6 +4,7 @@ import { runMonitorJob } from './jobs/monitorXProfile';
 import { startCallbackHandler } from './telegram/callbackHandler';
 import waClient from './whatsapp/waClient';
 import { startHealthServer } from './healthServer';
+import { bootstrapDataFromEnv } from './bootstrapData';
 import logger from './utils/logger';
 
 const IS_TEST = process.argv.includes('--test');
@@ -23,6 +24,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  bootstrapDataFromEnv();
   startHealthServer();
 
   waClient.initialize().catch((err: Error) => {
