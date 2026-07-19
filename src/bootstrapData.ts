@@ -100,14 +100,17 @@ export async function bootstrapDataFromEnv(): Promise<void> {
 
   await bootstrapWaSessionFromUrl();
 
-  // Archive on volume is source of truth after npm run wa:push-session
-  if (fs.existsSync(SESSION_ARCHIVE)) {
+  // Only restore archive when session folder is missing — never overwrite a live session
+  // (overwriting a LOGOUT'd Mac session every boot caused an infinite crash loop).
+  if (!fs.existsSync(SESSION_MARKER) && fs.existsSync(SESSION_ARCHIVE)) {
     try {
       logger.info('Restoring WhatsApp session from wa-session.tar.gz on volume');
       restoreSessionFromTarGz(SESSION_ARCHIVE);
     } catch (err) {
       logger.error('Failed to restore wa-session.tar.gz', { error: (err as Error).message });
     }
+  } else if (fs.existsSync(SESSION_MARKER)) {
+    logger.info('Using existing WhatsApp session on volume (skip archive restore)');
   }
 
   logDataDirStatus();

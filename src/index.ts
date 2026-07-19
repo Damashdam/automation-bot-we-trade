@@ -52,6 +52,16 @@ async function main(): Promise<void> {
   logger.info('Bot is running — press Ctrl+C to stop');
 }
 
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  // WhatsApp Web navigates away on LOGOUT; wwebjs can throw this uncaught
+  if (msg.includes('Execution context was destroyed')) {
+    logger.warn('Ignored WA navigation error after disconnect', { msg });
+    return;
+  }
+  logger.error('unhandledRejection', { msg });
+});
+
 main().catch((err: Error) => {
   logger.error('Fatal startup error', { error: err.message, stack: err.stack });
   process.exit(1);

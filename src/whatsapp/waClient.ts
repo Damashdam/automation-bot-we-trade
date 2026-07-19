@@ -171,14 +171,43 @@ client.on('auth_failure', (msg) => {
   logger.error('WhatsApp auth failed', { msg });
 });
 
+function clearSessionFiles(): void {
+  const archive = path.join(DATA_DIR, 'wa-session.tar.gz');
+  try {
+    if (fs.existsSync(SESSION_DIR)) fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+    if (fs.existsSync(archive)) fs.unlinkSync(archive);
+    fs.mkdirSync(SESSION_DIR, { recursive: true });
+  } catch (err) {
+    logger.warn('Could not clear WA session files', { error: (err as Error).message });
+  }
+}
+
+let reinitTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleReinit(delayMs: number): void {
+  if (reinitTimer) clearTimeout(reinitTimer);
+  reinitTimer = setTimeout(() => {
+    client.initialize().catch((err: Error) => {
+      logger.error('WhatsApp re-init failed', { error: err.message });
+    });
+  }, delayMs);
+}
+
 client.on('disconnected', (reason) => {
   ready = false;
-  logger.warn('WhatsApp disconnected — reconnecting in 8s', { reason: String(reason) });
-  setTimeout(() => {
-    client.initialize().catch((err: Error) => {
-      logger.error('WhatsApp reconnect failed', { error: err.message });
-    });
-  }, 8_000);
+  const why = String(reason);
+  if (why === 'LOGOUT') {
+    // Mac/old session rejected by WhatsApp — must scan QR on Railway (same browser as runtime)
+    logger.error(
+      'WhatsApp LOGOUT — cleared invalid session. Open /wa-qr and scan from Business Linked devices',
+    );
+    clearSessionFiles();
+    clearQrArtifacts();
+    scheduleReinit(3_000);
+    return;
+  }
+  logger.warn('WhatsApp disconnected — reconnecting in 8s', { reason: why });
+  scheduleReinit(8_000);
 });
 
 if (usePairing) {
