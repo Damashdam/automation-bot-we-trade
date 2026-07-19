@@ -3,9 +3,10 @@ import path from 'path';
 import fs from 'fs';
 import logger from '../utils/logger';
 
-const DB_PATH =
-  process.env.DATABASE_URL ||
-  path.join(process.env.DATA_DIR || path.join(process.cwd(), 'data'), 'wetrade.db');
+// Prefer DATA_DIR (Railway volume) so DB survives restarts and matches cookies/session paths.
+const DB_PATH = process.env.DATA_DIR
+  ? path.join(process.env.DATA_DIR, 'wetrade.db')
+  : process.env.DATABASE_URL || path.join(process.cwd(), 'data', 'wetrade.db');
 
 let db: DatabaseSync | null = null;
 

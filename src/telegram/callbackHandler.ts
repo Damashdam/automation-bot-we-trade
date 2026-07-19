@@ -1,8 +1,17 @@
 import axios, { AxiosError } from 'axios';
-import { getPost, markChatSent } from '../db/database';
+import { getPost, markChatSent, savePost } from '../db/database';
 import { sendChatMessage } from '../wetrade/sendChatMessage';
 import { sendToWhatsappGroup } from '../whatsapp/sendWhatsappGroup';
 import logger from '../utils/logger';
+
+/** Text from Telegram message when DB row is missing (redeploy / multi-instance). */
+function textFromTelegramMessage(msg: TgMessage): string {
+  const raw = (msg.caption ?? msg.text ?? '').trim();
+  return raw
+    .replace(/\n\n✅ _פורסם לצ'אט_$/u, '')
+    .replace(/\n\n✅ _פורסם לצ׳אט_$/u, '')
+    .trim();
+}
 
 function apiUrl(method: string): string {
   return `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/${method}`;
@@ -297,10 +306,25 @@ export async function startCallbackHandler(): Promise<void> {
           continue;
         }
 
-        if (!post?.generated_message) {
+        const fromTg = cq.message ? textFromTelegramMessage(cq.message) : '';
+        const messageText = post?.generated_message || fromTg;
+
+        if (!messageText) {
           logger.warn('Approval received but post not found', { postId });
           await answerCallback(cq.id, 'שגיאה: פוסט לא נמצא');
           continue;
+        }
+
+        if (!post?.generated_message && fromTg) {
+          logger.warn('Post missing in DB — using Telegram message text', { postId });
+          savePost({
+            post_id: postId,
+            post_url: `https://x.com/i/status/${postId}`,
+            original_text: fromTg,
+            generated_message: fromTg,
+            media_url: null,
+            sent_to_whatsapp: false,
+          });
         }
 
         processing.add(postId);
@@ -308,10 +332,11 @@ export async function startCallbackHandler(): Promise<void> {
         try {
           if (cq.message) {
             const original = cq.message.text ?? cq.message.caption ?? '';
+            // Prefer photo URL from Telegram only if we have DB media; else undefined
             await publishPost(
               postId,
-              post.generated_message,
-              post.media_url ?? undefined,
+              messageText,
+              post?.media_url ?? undefined,
               cq.message.chat.id,
               cq.message.message_id,
               original,
