@@ -71,9 +71,21 @@ const client = new Client({
 });
 
 let ready = false;
+let everAuthenticated = false;
 let latestQrDataUrl: string | null = null;
 let latestPairingCode: string | null = null;
 let lastQrAt = 0;
+let lastProgressAt = Date.now();
+let recovering = false;
+let watchdogStarted = false;
+
+function markProgress(): void {
+  lastProgressAt = Date.now();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 export function isClientReady(): boolean {
   return ready;
@@ -107,8 +119,8 @@ export async function probeWWebJS(): Promise<boolean> {
 }
 
 /**
- * Ensure send APIs exist. If navigation wiped inject, re-run Client.inject().
- * Updates `ready` to match reality (fixes false-positive whatsappReady).
+ * Ensure send APIs exist. Waits for inject; re-runs Client.inject() only after
+ * we were authenticated (never during QR / cold boot — that blocks QR).
  */
 export async function ensureClientSendable(timeoutMs = 45_000): Promise<boolean> {
   if (await probeWWebJS()) {
@@ -116,27 +128,24 @@ export async function ensureClientSendable(timeoutMs = 45_000): Promise<boolean>
     return true;
   }
 
-  ready = false;
   const page = getPupPage();
   if (!page) {
-    logger.warn('WhatsApp pupPage missing — cannot send');
+    ready = false;
     return false;
   }
 
-  // Prefer wait first — full inject() while already authenticated can race with WA Web
-  try {
-    await page.waitForFunction(
-      () =>
-        typeof (window as unknown as { WWebJS?: { sendMessage?: unknown } }).WWebJS
-          ?.sendMessage === 'function',
-      { timeout: Math.min(12_000, timeoutMs) },
-    );
+  const waitUntil = Date.now() + timeoutMs;
+  while (Date.now() < waitUntil) {
     if (await probeWWebJS()) {
       ready = true;
       return true;
     }
-  } catch {
-    /* fall through to re-inject */
+    await sleep(800);
+  }
+
+  if (!everAuthenticated) {
+    ready = false;
+    return false;
   }
 
   logger.warn('WWebJS missing — re-injecting WhatsApp store helpers');
@@ -146,26 +155,18 @@ export async function ensureClientSendable(timeoutMs = 45_000): Promise<boolean>
     logger.warn('WhatsApp re-inject failed', { error: (err as Error).message });
   }
 
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  const reinjectUntil = Date.now() + Math.min(20_000, timeoutMs);
+  while (Date.now() < reinjectUntil) {
     if (await probeWWebJS()) {
       ready = true;
       clearQrArtifacts();
       logger.info('WhatsApp WWebJS restored — send ready');
       return true;
     }
-    try {
-      await page.waitForFunction(
-        () =>
-          typeof (window as unknown as { WWebJS?: { sendMessage?: unknown } }).WWebJS
-            ?.sendMessage === 'function',
-        { timeout: Math.min(5_000, Math.max(500, deadline - Date.now())) },
-      );
-    } catch {
-      /* keep polling */
-    }
+    await sleep(800);
   }
 
+  ready = false;
   logger.error('WhatsApp WWebJS still missing after re-inject');
   return false;
 }
@@ -214,9 +215,10 @@ async function captureNativeQrImage(): Promise<Buffer | null> {
 client.on('qr', async (qr) => {
   lastQrAt = Date.now();
   ready = false;
+  markProgress();
 
   try {
-    await new Promise((r) => setTimeout(r, 400));
+    await sleep(400);
     const native = await captureNativeQrImage();
     if (native) {
       fs.writeFileSync(QR_PNG, native);
@@ -239,34 +241,48 @@ client.on('qr', async (qr) => {
 
 client.on('code', (code: string) => {
   latestPairingCode = code;
+  markProgress();
   logger.warn(`WhatsApp PAIRING CODE: ${code}`);
 });
 
 client.on('authenticated', () => {
+  everAuthenticated = true;
+  markProgress();
   clearQrArtifacts();
   logger.info('WhatsApp authenticated');
 });
 
+client.on('loading_screen', (percent: number | string) => {
+  markProgress();
+  logger.info('WhatsApp loading', { percent });
+});
+
 client.on('ready', () => {
-  // Settle + verify inject APIs before advertising ready (avoids false whatsappReady)
+  everAuthenticated = true;
+  markProgress();
+  // Soft settle only — do NOT call inject() here (blocks / races QR & boot)
   setTimeout(() => {
     void (async () => {
-      const ok = await ensureClientSendable(30_000);
-      if (ok) {
-        clearQrArtifacts();
-        logger.info('WhatsApp client ready');
-      } else {
-        ready = false;
-        logger.error('WhatsApp ready event but WWebJS not available');
+      for (let i = 0; i < 20; i++) {
+        if (await probeWWebJS()) {
+          ready = true;
+          clearQrArtifacts();
+          logger.info('WhatsApp client ready');
+          return;
+        }
+        await sleep(1_000);
       }
+      ready = false;
+      logger.error('WhatsApp ready event but WWebJS not available');
     })();
-  }, 3_000);
+  }, 2_000);
 });
 
 client.on('auth_failure', (msg) => {
   ready = false;
   clearQrArtifacts();
   logger.error('WhatsApp auth failed', { msg });
+  void hardRecover(true, 5_000);
 });
 
 function clearSessionFiles(): void {
@@ -285,10 +301,36 @@ let reinitTimer: ReturnType<typeof setTimeout> | null = null;
 function scheduleReinit(delayMs: number): void {
   if (reinitTimer) clearTimeout(reinitTimer);
   reinitTimer = setTimeout(() => {
-    client.initialize().catch((err: Error) => {
-      logger.error('WhatsApp re-init failed', { error: err.message });
-    });
+    void hardRecover(false, 0);
   }, delayMs);
+}
+
+async function hardRecover(clearSession: boolean, delayMs: number): Promise<void> {
+  if (recovering) return;
+  recovering = true;
+  ready = false;
+  try {
+    if (delayMs > 0) await sleep(delayMs);
+    logger.warn('WhatsApp hard recover', { clearSession });
+    try {
+      await client.destroy();
+    } catch {
+      /* ignore */
+    }
+    if (clearSession) {
+      clearSessionFiles();
+      everAuthenticated = false;
+    }
+    clearQrArtifacts();
+    markProgress();
+    await client.initialize();
+  } catch (err) {
+    logger.error('WhatsApp hard recover failed', { error: (err as Error).message });
+    recovering = false;
+    scheduleReinit(15_000);
+    return;
+  }
+  recovering = false;
 }
 
 client.on('disconnected', (reason) => {
@@ -299,14 +341,35 @@ client.on('disconnected', (reason) => {
     logger.error(
       'WhatsApp LOGOUT — cleared invalid session. Open /wa-qr and scan from Business Linked devices',
     );
-    clearSessionFiles();
-    clearQrArtifacts();
-    scheduleReinit(3_000);
+    void hardRecover(true, 3_000);
     return;
   }
   logger.warn('WhatsApp disconnected — reconnecting in 8s', { reason: why });
   scheduleReinit(8_000);
 });
+
+/**
+ * If Chromium boots into a dead session (no ready, no QR), clear and re-link.
+ * Call once after the first initialize() attempt.
+ */
+export function startWhatsAppWatchdog(): void {
+  if (watchdogStarted) return;
+  watchdogStarted = true;
+  markProgress();
+
+  setInterval(() => {
+    void (async () => {
+      if (recovering || ready) return;
+      if (latestQrDataUrl || latestPairingCode) return; // waiting for user scan
+      if (Date.now() - lastProgressAt < 75_000) return;
+
+      logger.error(
+        'WhatsApp stuck with no ready/QR for 75s — clearing session so /wa-qr can appear',
+      );
+      await hardRecover(true, 0);
+    })();
+  }, 20_000);
+}
 
 if (usePairing) {
   logger.info('WhatsApp auth: pairing-code mode', { phone: phoneDigits });

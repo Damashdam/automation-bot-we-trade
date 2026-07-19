@@ -236,7 +236,10 @@ export async function sendToWhatsappGroup(text: string, mediaUrl?: string): Prom
 
   if (!(await waitForReady())) {
     logger.warn('WhatsApp client not ready — skipping group send');
-    return { success: false, error: 'WhatsApp client not ready' };
+    return {
+      success: false,
+      error: 'WhatsApp client not ready (scan /wa-qr, wait for wwebjs:true)',
+    };
   }
 
   if (!GROUP_ID) {

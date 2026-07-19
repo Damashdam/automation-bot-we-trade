@@ -114,7 +114,7 @@ async function publishPost(
     } else {
       await sendSimpleMessage(
         chatId,
-        `✅ פורסם לצ\'אט\n⚠️ וואטסאפ נכשל: ${waResult.error ?? 'לא מוכן'}\n(בדקו /health → whatsappReady)`,
+        `✅ פורסם לצ\'אט\n⚠️ וואטסאפ נכשל: ${waResult.error ?? 'לא מוכן'}\n(בדקו /health → whatsappReady + wwebjs, ואם צריך סרקו /wa-qr)`,
       );
     }
   } else {

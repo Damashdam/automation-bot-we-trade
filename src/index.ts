@@ -2,7 +2,7 @@ import 'dotenv/config';
 import cron from 'node-cron';
 import { runMonitorJob } from './jobs/monitorXProfile';
 import { startCallbackHandler } from './telegram/callbackHandler';
-import waClient from './whatsapp/waClient';
+import waClient, { startWhatsAppWatchdog } from './whatsapp/waClient';
 import { startHealthServer } from './healthServer';
 import { bootstrapDataFromEnv } from './bootstrapData';
 import logger from './utils/logger';
@@ -33,10 +33,13 @@ async function main(): Promise<void> {
   });
 
   // Init WhatsApp before the first scrape storm (Chromium needs CPU/RAM)
+  startWhatsAppWatchdog();
   try {
     await waClient.initialize();
   } catch (err) {
-    logger.error('WhatsApp init failed', { error: (err as Error).message });
+    logger.error('WhatsApp init failed — watchdog will retry', {
+      error: (err as Error).message,
+    });
   }
 
   // Run once after WA has had a chance to become ready
