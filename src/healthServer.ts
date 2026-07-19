@@ -4,6 +4,7 @@ import path from 'path';
 import logger from './utils/logger';
 import {
   isClientReady,
+  probeWWebJS,
   getQrPngPath,
   getLatestQrDataUrl,
   getLatestPairingCode,
@@ -133,16 +134,20 @@ export function startHealthServer(): void {
     }
 
     if (url === '/health' || url === '/') {
-      const body = JSON.stringify({
-        ok: true,
-        whatsappReady: isClientReady(),
-        hasQr: Boolean(getLatestQrDataUrl()),
-        hasPairingCode: Boolean(getLatestPairingCode()),
-        qrAgeSec: getLastQrAt() ? Math.floor((Date.now() - getLastQrAt()) / 1000) : null,
-        uptimeSec: Math.floor(process.uptime()),
-      });
-      res.writeHead(200, { 'Content-Type': 'application/json', ...NO_CACHE });
-      res.end(body);
+      void (async () => {
+        const wwebjs = await probeWWebJS();
+        const body = JSON.stringify({
+          ok: true,
+          whatsappReady: isClientReady(),
+          wwebjs,
+          hasQr: Boolean(getLatestQrDataUrl()),
+          hasPairingCode: Boolean(getLatestPairingCode()),
+          qrAgeSec: getLastQrAt() ? Math.floor((Date.now() - getLastQrAt()) / 1000) : null,
+          uptimeSec: Math.floor(process.uptime()),
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json', ...NO_CACHE });
+        res.end(body);
+      })();
       return;
     }
 

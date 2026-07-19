@@ -1,5 +1,5 @@
 import { MessageMedia } from 'whatsapp-web.js';
-import client, { isClientReady } from './waClient';
+import client, { ensureClientSendable } from './waClient';
 import logger from '../utils/logger';
 
 const GROUP_NAME = (process.env.WHATSAPP_GROUP_NAME || '').trim();
@@ -44,15 +44,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 async function waitForReady(timeoutMs = 45_000): Promise<boolean> {
-  if (isClientReady()) return true;
-  const interval = 1_000;
-  let elapsed = 0;
-  while (elapsed < timeoutMs) {
-    await new Promise((r) => setTimeout(r, interval));
-    elapsed += interval;
-    if (isClientReady()) return true;
-  }
-  return false;
+  // Probe + wait/re-inject — ready flag alone can be a false positive
+  return ensureClientSendable(timeoutMs);
 }
 
 const SAFE_SEND_OPTS = {
@@ -160,7 +153,14 @@ async function sendViaPage(chatId: string, text: string): Promise<void> {
 }
 
 async function sendText(chatId: string, text: string): Promise<void> {
-  // 1) Direct API (worked locally with GROUP_ID)
+  const errors: string[] = [];
+
+  // Re-check inject right before send (framenavigated can wipe mid-flight)
+  if (!(await ensureClientSendable(20_000))) {
+    throw new Error('WWebJS_missing after re-inject');
+  }
+
+  // 1) Direct API
   try {
     await withTimeout(
       client.sendMessage(chatId, text, { ...SAFE_SEND_OPTS }),
@@ -169,7 +169,9 @@ async function sendText(chatId: string, text: string): Promise<void> {
     );
     return;
   } catch (err) {
-    logger.warn('sendMessage failed', { error: errDetail(err) });
+    const d = errDetail(err);
+    errors.push(`sendMessage: ${d}`);
+    logger.warn('sendMessage failed', { error: d });
   }
 
   // 2) Store path
@@ -177,11 +179,19 @@ async function sendText(chatId: string, text: string): Promise<void> {
     await sendViaStore(chatId, text);
     return;
   } catch (err) {
-    logger.warn('sendViaStore failed', { error: errDetail(err) });
+    const d = errDetail(err);
+    errors.push(`sendViaStore: ${d}`);
+    logger.warn('sendViaStore failed', { error: d });
   }
 
   // 3) WWebJS helpers
-  await sendViaPage(chatId, text);
+  try {
+    await sendViaPage(chatId, text);
+    return;
+  } catch (err) {
+    errors.push(`sendViaPage: ${errDetail(err)}`);
+    throw new Error(errors.join(' || '));
+  }
 }
 
 async function sendOnce(chatId: string, text: string, mediaUrl?: string): Promise<void> {

@@ -79,6 +79,97 @@ export function isClientReady(): boolean {
   return ready;
 }
 
+type PupPage = {
+  evaluate: <T>(fn: () => T | Promise<T>) => Promise<T>;
+  waitForFunction: (
+    fn: string | (() => boolean),
+    opts?: { timeout?: number },
+  ) => Promise<unknown>;
+};
+
+function getPupPage(): PupPage | undefined {
+  return (client as unknown as { pupPage?: PupPage }).pupPage;
+}
+
+/** True when WhatsApp Web page has wwebjs send APIs injected. */
+export async function probeWWebJS(): Promise<boolean> {
+  const page = getPupPage();
+  if (!page) return false;
+  try {
+    return await page.evaluate(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const w = window as any;
+      return typeof w.WWebJS?.sendMessage === 'function' && typeof w.WWebJS?.getChat === 'function';
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ensure send APIs exist. If navigation wiped inject, re-run Client.inject().
+ * Updates `ready` to match reality (fixes false-positive whatsappReady).
+ */
+export async function ensureClientSendable(timeoutMs = 45_000): Promise<boolean> {
+  if (await probeWWebJS()) {
+    ready = true;
+    return true;
+  }
+
+  ready = false;
+  const page = getPupPage();
+  if (!page) {
+    logger.warn('WhatsApp pupPage missing — cannot send');
+    return false;
+  }
+
+  // Prefer wait first — full inject() while already authenticated can race with WA Web
+  try {
+    await page.waitForFunction(
+      () =>
+        typeof (window as unknown as { WWebJS?: { sendMessage?: unknown } }).WWebJS
+          ?.sendMessage === 'function',
+      { timeout: Math.min(12_000, timeoutMs) },
+    );
+    if (await probeWWebJS()) {
+      ready = true;
+      return true;
+    }
+  } catch {
+    /* fall through to re-inject */
+  }
+
+  logger.warn('WWebJS missing — re-injecting WhatsApp store helpers');
+  try {
+    await (client as unknown as { inject: () => Promise<void> }).inject();
+  } catch (err) {
+    logger.warn('WhatsApp re-inject failed', { error: (err as Error).message });
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await probeWWebJS()) {
+      ready = true;
+      clearQrArtifacts();
+      logger.info('WhatsApp WWebJS restored — send ready');
+      return true;
+    }
+    try {
+      await page.waitForFunction(
+        () =>
+          typeof (window as unknown as { WWebJS?: { sendMessage?: unknown } }).WWebJS
+            ?.sendMessage === 'function',
+        { timeout: Math.min(5_000, Math.max(500, deadline - Date.now())) },
+      );
+    } catch {
+      /* keep polling */
+    }
+  }
+
+  logger.error('WhatsApp WWebJS still missing after re-inject');
+  return false;
+}
+
 export function getLatestQrDataUrl(): string | null {
   return latestQrDataUrl;
 }
@@ -157,12 +248,19 @@ client.on('authenticated', () => {
 });
 
 client.on('ready', () => {
-  // Brief settle so WA Web finishes wiring send APIs
+  // Settle + verify inject APIs before advertising ready (avoids false whatsappReady)
   setTimeout(() => {
-    ready = true;
-    clearQrArtifacts();
-    logger.info('WhatsApp client ready');
-  }, 5_000);
+    void (async () => {
+      const ok = await ensureClientSendable(30_000);
+      if (ok) {
+        clearQrArtifacts();
+        logger.info('WhatsApp client ready');
+      } else {
+        ready = false;
+        logger.error('WhatsApp ready event but WWebJS not available');
+      }
+    })();
+  }, 3_000);
 });
 
 client.on('auth_failure', (msg) => {
