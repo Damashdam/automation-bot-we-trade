@@ -1,0 +1,10 @@
+# Ignore everything by default in Docker build context noise
+.git
+node_modules
+dist
+logs
+data
+.env
+*.md
+.wwebjs_cache
+.claude

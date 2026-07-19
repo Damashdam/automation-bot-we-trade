@@ -1,0 +1,38 @@
+{
+  "name": "wetrade-news-bot",
+  "version": "1.0.0",
+  "description": "WeTrade automatic Hebrew market news monitoring and WhatsApp delivery bot",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "NODE_ENV=production node --disable-warning=ExperimentalWarning dist/index.js",
+    "dev": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' ts-node src/index.ts",
+    "docker:up": "docker compose up -d --build",
+    "docker:logs": "docker compose logs -f",
+    "test:fetch": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' ts-node src/index.ts --test",
+    "auth": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' ts-node src/scraper/auth.ts",
+    "wa:test": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' ts-node src/whatsapp/testSend.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@vitalets/google-translate-api": "^9.2.1",
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "fast-xml-parser": "^4.4.0",
+    "node-cron": "^3.0.3",
+    "openai": "^6.45.0",
+    "playwright": "^1.45.0",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "github:pedroslopez/whatsapp-web.js#main",
+    "winston": "^3.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/qrcode": "^1.5.6",
+    "@types/qrcode-terminal": "^0.12.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}
