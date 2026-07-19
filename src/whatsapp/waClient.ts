@@ -1,7 +1,6 @@
 import 'dotenv/config';
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import QRCode from 'qrcode';
-import qrcodeTerminal from 'qrcode-terminal';
 import path from 'path';
 import fs from 'fs';
 import logger from '../utils/logger';
@@ -53,7 +52,6 @@ const client = new Client({
 });
 
 let ready = false;
-let latestQrPayload: string | null = null;
 let latestQrDataUrl: string | null = null;
 let latestPairingCode: string | null = null;
 let lastQrAt = 0;
@@ -79,7 +77,6 @@ export function getLastQrAt(): number {
 }
 
 function clearQrArtifacts(): void {
-  latestQrPayload = null;
   latestQrDataUrl = null;
   latestPairingCode = null;
   try {
@@ -89,21 +86,46 @@ function clearQrArtifacts(): void {
   }
 }
 
+/** Prefer WhatsApp Web's own canvas (same as local Chrome window) — not log ASCII. */
+async function captureNativeQrImage(): Promise<Buffer | null> {
+  const page = (client as unknown as { pupPage?: { $: Function; waitForSelector: Function } }).pupPage;
+  if (!page) return null;
+  try {
+    await page.waitForSelector('canvas', { timeout: 8_000 });
+    const canvas = await page.$('canvas');
+    if (!canvas) return null;
+    const buf = (await canvas.screenshot({ type: 'png' })) as Buffer;
+    return buf?.length ? buf : null;
+  } catch {
+    return null;
+  }
+}
+
 client.on('qr', async (qr) => {
-  latestQrPayload = qr;
   lastQrAt = Date.now();
   ready = false;
 
   try {
+    // Small delay so WhatsApp paints the canvas
+    await new Promise((r) => setTimeout(r, 400));
+    const native = await captureNativeQrImage();
+    if (native) {
+      fs.writeFileSync(QR_PNG, native);
+      latestQrDataUrl = `data:image/png;base64,${native.toString('base64')}`;
+      logger.warn('WhatsApp QR ready — open /wa-qr in browser (do NOT scan Railway log ASCII)');
+      return;
+    }
+
+    // Fallback encode if canvas not found yet
     latestQrDataUrl = await QRCode.toDataURL(qr, {
       width: 512,
       margin: 2,
       errorCorrectionLevel: 'M',
     });
     await QRCode.toFile(QR_PNG, qr, { width: 512, margin: 2, errorCorrectionLevel: 'M' });
-    // ASCII in logs — scan from Railway logs if needed (not the stale PNG file)
-    qrcodeTerminal.generate(qr, { small: true });
-    logger.warn('WhatsApp QR refreshed — open /wa-qr in browser and scan with camera (Linked devices)');
+    logger.warn(
+      'WhatsApp QR ready (generated) — open /wa-qr in browser. Ignore ASCII/logs — they wrap and break scan.',
+    );
   } catch (err) {
     logger.warn('Could not render QR', { error: (err as Error).message });
   }
@@ -111,10 +133,7 @@ client.on('qr', async (qr) => {
 
 client.on('code', (code: string) => {
   latestPairingCode = code;
-  logger.warn('══════════════════════════════════════');
   logger.warn(`WhatsApp PAIRING CODE: ${code}`);
-  logger.warn('Enter it on the phone if Business shows Link with phone number');
-  logger.warn('══════════════════════════════════════');
 });
 
 client.on('authenticated', () => {
@@ -147,7 +166,7 @@ client.on('disconnected', (reason) => {
 if (usePairing) {
   logger.info('WhatsApp auth: pairing-code mode', { phone: phoneDigits });
 } else {
-  logger.info('WhatsApp auth: QR / existing session (set WA_USE_PAIRING_CODE=true only if phone supports it)');
+  logger.info('WhatsApp auth: QR / existing session');
 }
 
 export default client;

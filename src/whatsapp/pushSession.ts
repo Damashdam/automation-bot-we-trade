@@ -1,8 +1,9 @@
 /**
  * Pack local Chrome-linked WhatsApp session and upload to Railway.
  *
- * Usage:
- *   WA_UPLOAD_TOKEN=your-secret npm run wa:push-session
+ * Usage (token = WA_UPLOAD_TOKEN or TELEGRAM_BOT_TOKEN from .env):
+ *   npm run wa:push-session
+ *   WA_UPLOAD_TOKEN=... npm run wa:push-session
  */
 import 'dotenv/config';
 import fs from 'fs';
@@ -13,7 +14,6 @@ function pack(): void {
   if (!fs.existsSync(SESSION_MARKER)) {
     console.error('No local session. Link once locally first:');
     console.error('  WA_HEADLESS=false npm run wa:test');
-    console.error('Scan the Chrome WINDOW (not any PNG file), then re-run this.');
     process.exit(1);
   }
 
@@ -49,7 +49,9 @@ function uploadWithCurl(urlBase: string, token: string): void {
   } catch (err) {
     const e = err as { status?: number; stderr?: Buffer; stdout?: Buffer; message?: string };
     const detail = [e.stdout?.toString(), e.stderr?.toString(), e.message].filter(Boolean).join('\n');
-    throw new Error(`Upload failed.\n${detail}\n\nCheck: WA_UPLOAD_TOKEN on Railway matches, and Volume is /app/data`);
+    throw new Error(
+      `Upload failed.\n${detail}\n\nWait for Railway deploy, then retry. Token = WA_UPLOAD_TOKEN or TELEGRAM_BOT_TOKEN.`,
+    );
   }
 }
 
@@ -57,15 +59,16 @@ function main(): void {
   const botUrl =
     process.env.WA_BOT_URL?.trim() ||
     'https://automation-bot-we-trade-production.up.railway.app';
-  const token = process.env.WA_UPLOAD_TOKEN?.trim();
+  const token =
+    process.env.WA_UPLOAD_TOKEN?.trim() || process.env.TELEGRAM_BOT_TOKEN?.trim();
   if (!token) {
-    console.error('Set WA_UPLOAD_TOKEN (same value as in Railway Variables).');
+    console.error('Set WA_UPLOAD_TOKEN or TELEGRAM_BOT_TOKEN in .env');
     process.exit(1);
   }
 
   pack();
   uploadWithCurl(botUrl, token);
-  console.log('Done. Watch Railway logs for "WhatsApp client ready" (not QR).');
+  console.log('Done. Check /health → whatsappReady:true');
 }
 
 try {

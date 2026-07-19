@@ -18,12 +18,20 @@ const NO_CACHE = {
 
 const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
 
+function uploadTokenOk(header: string | string[] | undefined): boolean {
+  const sent = (Array.isArray(header) ? header[0] : header)?.trim();
+  if (!sent) return false;
+  const allowed = [process.env.WA_UPLOAD_TOKEN, process.env.TELEGRAM_BOT_TOKEN]
+    .map((v) => v?.trim())
+    .filter((v): v is string => Boolean(v));
+  return allowed.includes(sent);
+}
+
 function handleSessionUpload(req: http.IncomingMessage, res: http.ServerResponse): void {
-  const expected = process.env.WA_UPLOAD_TOKEN?.trim();
-  if (!expected || req.headers['x-upload-token'] !== expected) {
-    logger.warn('WA session upload rejected — bad or missing WA_UPLOAD_TOKEN');
+  if (!uploadTokenOk(req.headers['x-upload-token'])) {
+    logger.warn('WA session upload rejected — bad token (use WA_UPLOAD_TOKEN or TELEGRAM_BOT_TOKEN)');
     res.writeHead(401, { 'Content-Type': 'text/plain' });
-    res.end('Unauthorized — set WA_UPLOAD_TOKEN and send X-Upload-Token header');
+    res.end('Unauthorized — X-Upload-Token must match WA_UPLOAD_TOKEN or TELEGRAM_BOT_TOKEN');
     return;
   }
 
