@@ -14,18 +14,35 @@ const headless =
     ? process.env.WA_HEADLESS === 'true'
     : process.env.NODE_ENV === 'production';
 
-const chromePath =
-  process.env.CHROME_PATH ||
-  process.env.PUPPETEER_EXECUTABLE_PATH ||
-  (process.platform === 'darwin'
-    ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-    : undefined);
+/**
+ * System Chromium in Docker makes sendMessage/page.evaluate hang.
+ * Default: let Puppeteer use its bundled Chrome (installed in Docker build).
+ * Override only with WA_CHROME_PATH or WA_USE_SYSTEM_CHROMIUM=true.
+ */
+function resolveChromePath(): string | undefined {
+  if (process.env.WA_CHROME_PATH) return process.env.WA_CHROME_PATH;
+  if (process.env.WA_USE_SYSTEM_CHROMIUM === 'true') {
+    return process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
+  }
+  if (process.platform === 'darwin') {
+    return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+  }
+  // Linux/Railway: undefined → Puppeteer bundled Chrome
+  return undefined;
+}
+
+const chromePath = resolveChromePath();
 
 const phoneDigits = (process.env.WHATSAPP_PHONE_NUMBER || '').replace(/\D/g, '');
 const usePairing =
   process.env.WA_USE_PAIRING_CODE === 'true' && phoneDigits.length >= 10;
 
 fs.mkdirSync(SESSION_DIR, { recursive: true });
+
+logger.info('WhatsApp browser', {
+  headless,
+  executablePath: chromePath || '(puppeteer bundled Chrome)',
+});
 
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: SESSION_DIR }),
@@ -46,8 +63,9 @@ const client = new Client({
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
-      '--no-zygote',
-      // Do NOT use --single-process: hangs Chromium on Railway and blocks /health
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-background-timer-throttling',
     ],
   },
 });
@@ -107,7 +125,6 @@ client.on('qr', async (qr) => {
   ready = false;
 
   try {
-    // Small delay so WhatsApp paints the canvas
     await new Promise((r) => setTimeout(r, 400));
     const native = await captureNativeQrImage();
     if (native) {
@@ -117,16 +134,13 @@ client.on('qr', async (qr) => {
       return;
     }
 
-    // Fallback encode if canvas not found yet
     latestQrDataUrl = await QRCode.toDataURL(qr, {
       width: 512,
       margin: 2,
       errorCorrectionLevel: 'M',
     });
     await QRCode.toFile(QR_PNG, qr, { width: 512, margin: 2, errorCorrectionLevel: 'M' });
-    logger.warn(
-      'WhatsApp QR ready (generated) — open /wa-qr in browser. Ignore ASCII/logs — they wrap and break scan.',
-    );
+    logger.warn('WhatsApp QR ready (generated) — open /wa-qr in browser');
   } catch (err) {
     logger.warn('Could not render QR', { error: (err as Error).message });
   }
@@ -143,9 +157,12 @@ client.on('authenticated', () => {
 });
 
 client.on('ready', () => {
-  ready = true;
-  clearQrArtifacts();
-  logger.info('WhatsApp client ready');
+  // Brief settle so WA Web finishes wiring send APIs
+  setTimeout(() => {
+    ready = true;
+    clearQrArtifacts();
+    logger.info('WhatsApp client ready');
+  }, 5_000);
 });
 
 client.on('auth_failure', (msg) => {
