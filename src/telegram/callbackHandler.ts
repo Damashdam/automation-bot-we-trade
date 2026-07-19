@@ -330,6 +330,12 @@ export async function startCallbackHandler(): Promise<void> {
         : (err as Error).message;
       if (isNetworkErr) {
         logger.warn('Callback handler: connection lost — retrying in 5s');
+      } else if (err instanceof AxiosError && err.response?.status === 404) {
+        logger.error(
+          'Telegram 404 — TELEGRAM_BOT_TOKEN is invalid/missing in Railway Variables. Fix token and redeploy.',
+        );
+        await new Promise<void>((r) => setTimeout(r, 30_000));
+        continue;
       } else {
         logger.error('Callback handler error', { error: detail });
       }
