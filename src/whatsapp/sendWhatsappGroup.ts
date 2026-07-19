@@ -31,6 +31,22 @@ function inviteCodeFromUrl(url: string): string | null {
   return m?.[1] ?? null;
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
 async function waitForReady(timeoutMs = 45_000): Promise<boolean> {
   if (isClientReady()) return true;
   const interval = 1_000;
@@ -43,113 +59,67 @@ async function waitForReady(timeoutMs = 45_000): Promise<boolean> {
   return false;
 }
 
-async function listGroupsFromStore(): Promise<Array<{ name: string; id: string }>> {
-  const page = (client as unknown as { pupPage?: { evaluate: Function } }).pupPage;
-  if (!page) return [];
-
-  try {
-    return (await page.evaluate(() => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const w = window as any;
-      const out: Array<{ name: string; id: string }> = [];
-
-      try {
-        if (w.WWebJS?.getChats) {
-          // sync path may not exist; ignore
-        }
-      } catch {
-        /* ignore */
-      }
-
-      const models = w.Store?.Chat?.getModelsArray?.() ?? [];
-      for (const c of models) {
-        if (!c?.isGroup) continue;
-        const name = c.name || c.formattedTitle || '';
-        const id = c.id?._serialized || c.id?.toString?.() || '';
-        if (id) out.push({ name, id });
-      }
-      return out;
-    })) as Array<{ name: string; id: string }>;
-  } catch {
-    return [];
-  }
-}
-
-async function waitForGroups(timeoutMs = 25_000): Promise<Array<{ name: string; id: string }>> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const groups = await listGroupsFromStore();
-    if (groups.length > 0) return groups;
-    await new Promise((r) => setTimeout(r, 2_000));
-  }
-  return listGroupsFromStore();
-}
-
-async function ensureJoinedViaInvite(): Promise<string | null> {
+/** Warm the group chat in WA Store — without this, sendMessage often hangs forever. */
+async function warmGroupChat(chatId: string): Promise<void> {
   const code = inviteCodeFromUrl(GROUP_INVITE_URL);
-  if (!code) return null;
-
-  try {
-    const info = (await client.getInviteInfo(code)) as {
-      id?: string | { _serialized?: string };
-      subject?: string;
-    };
-    logger.info('WhatsApp invite info', {
-      subject: info?.subject,
-      id: typeof info?.id === 'string' ? info.id : info?.id?._serialized,
-    });
-  } catch (err) {
-    logger.warn('getInviteInfo failed', { error: errDetail(err) });
+  if (code) {
+    try {
+      await withTimeout(client.getInviteInfo(code), 12_000, 'getInviteInfo');
+    } catch (err) {
+      logger.warn('getInviteInfo warm failed', { error: errDetail(err) });
+    }
+    try {
+      const joined = await withTimeout(client.acceptInvite(code), 15_000, 'acceptInvite');
+      logger.info('Group warm via acceptInvite', { joined });
+    } catch (err) {
+      logger.warn('acceptInvite warm failed (often OK if already member)', {
+        error: errDetail(err),
+      });
+    }
   }
 
   try {
-    const joinedId = await client.acceptInvite(code);
-    logger.info('Joined / opened group via invite', { joinedId });
-    return typeof joinedId === 'string' ? joinedId : null;
+    const page = (client as unknown as { pupPage?: { evaluate: Function } }).pupPage;
+    if (page) {
+      await withTimeout(
+        page.evaluate(async (id: string) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const w = window as any;
+          if (w.WWebJS?.getChat) {
+            await w.WWebJS.getChat(id, { getAsModel: false });
+          }
+        }, chatId),
+        12_000,
+        'getChat warm',
+      );
+    }
   } catch (err) {
-    // Already a member often throws — try to recover id from invite info / store
-    logger.warn('acceptInvite failed (may already be a member)', { error: errDetail(err) });
-    return null;
+    logger.warn('getChat warm failed', { error: errDetail(err) });
   }
 }
 
 async function resolveGroupChatId(): Promise<string | null> {
-  // Prefer fixed id — avoids re-joining via invite on every send
   if (GROUP_ID) return GROUP_ID;
 
-  let groups = await waitForGroups(20_000);
-  let hit = groups.find((g) => g.name === GROUP_NAME);
-  if (hit) {
-    logger.info('Resolved WhatsApp group id — add to .env as WHATSAPP_GROUP_ID', hit);
-    return hit.id;
+  const code = inviteCodeFromUrl(GROUP_INVITE_URL);
+  if (code) {
+    try {
+      const info = (await withTimeout(client.getInviteInfo(code), 15_000, 'getInviteInfo')) as {
+        id?: string | { _serialized?: string };
+      };
+      const id =
+        typeof info?.id === 'string' ? info.id : info?.id?._serialized ?? null;
+      if (id) return id;
+    } catch (err) {
+      logger.warn('Could not resolve group from invite', { error: errDetail(err) });
+    }
   }
 
-  // Invite join only as last-resort bootstrap (once). Prefer setting WHATSAPP_GROUP_ID.
-  logger.warn('Group not in Store — one-time invite bootstrap (set WHATSAPP_GROUP_ID to skip)', {
-    wanted: GROUP_NAME,
-    seen: groups.map((g) => g.name),
-  });
-  const joinedId = await ensureJoinedViaInvite();
-  if (joinedId) return joinedId;
-
-  await new Promise((r) => setTimeout(r, 3_000));
-  groups = await waitForGroups(15_000);
-  hit =
-    groups.find((g) => g.name === GROUP_NAME) ||
-    groups.find(
-      (g) =>
-        g.name.includes('עדכונים') ||
-        g.name.replace(/\s/g, '') === GROUP_NAME.replace(/\s/g, ''),
-    );
-  if (hit) {
-    logger.info('Resolved WhatsApp group id — add to .env as WHATSAPP_GROUP_ID', hit);
-    return hit.id;
+  if (GROUP_NAME) {
+    logger.error('Set WHATSAPP_GROUP_ID in Railway — required for reliable sends', {
+      groupName: GROUP_NAME,
+    });
   }
-
-  logger.error('WhatsApp group not found', {
-    wanted: GROUP_NAME,
-    available: groups.map((g) => g.name),
-  });
   return null;
 }
 
@@ -162,27 +132,31 @@ async function sendViaPage(chatId: string, text: string): Promise<void> {
   const page = (client as unknown as { pupPage?: { evaluate: Function } }).pupPage;
   if (!page) throw new Error('WhatsApp pupPage not available');
 
-  const result = (await page.evaluate(
-    async (id: string, body: string) => {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const w = window as any;
-        if (!w.WWebJS?.getChat || !w.WWebJS?.sendMessage) {
-          return { ok: false, error: 'WWebJS_missing' };
+  const result = (await withTimeout(
+    page.evaluate(
+      async (id: string, body: string) => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const w = window as any;
+          if (!w.WWebJS?.getChat || !w.WWebJS?.sendMessage) {
+            return { ok: false, error: 'WWebJS_missing' };
+          }
+          const chat = await w.WWebJS.getChat(id, { getAsModel: false });
+          if (!chat) return { ok: false, error: 'chat_not_found' };
+          const msg = await w.WWebJS.sendMessage(chat, body, { linkPreview: false });
+          return { ok: !!msg, error: msg ? null : 'send_returned_empty' };
+        } catch (e) {
+          return {
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          };
         }
-        const chat = await w.WWebJS.getChat(id, { getAsModel: false });
-        if (!chat) return { ok: false, error: 'chat_not_found' };
-        const msg = await w.WWebJS.sendMessage(chat, body, { linkPreview: false });
-        return { ok: !!msg, error: msg ? null : 'send_returned_empty' };
-      } catch (e) {
-        return {
-          ok: false,
-          error: e instanceof Error ? e.message : String(e),
-        };
-      }
-    },
-    chatId,
-    text,
+      },
+      chatId,
+      text,
+    ),
+    25_000,
+    'sendViaPage',
   )) as { ok: boolean; error?: string | null };
 
   if (!result?.ok) {
@@ -193,11 +167,19 @@ async function sendViaPage(chatId: string, text: string): Promise<void> {
 async function sendOnce(chatId: string, text: string, mediaUrl?: string): Promise<void> {
   if (mediaUrl) {
     try {
-      const media = await MessageMedia.fromUrl(mediaUrl, { unsafeMime: true });
-      await client.sendMessage(chatId, media, {
-        ...SAFE_SEND_OPTS,
-        caption: text,
-      });
+      const media = await withTimeout(
+        MessageMedia.fromUrl(mediaUrl, { unsafeMime: true }),
+        20_000,
+        'MessageMedia.fromUrl',
+      );
+      await withTimeout(
+        client.sendMessage(chatId, media, {
+          ...SAFE_SEND_OPTS,
+          caption: text,
+        }),
+        30_000,
+        'sendMessage media',
+      );
       return;
     } catch (mediaErr) {
       logger.warn('Media send failed — falling back to text', {
@@ -207,7 +189,11 @@ async function sendOnce(chatId: string, text: string, mediaUrl?: string): Promis
   }
 
   try {
-    await client.sendMessage(chatId, text, { ...SAFE_SEND_OPTS });
+    await withTimeout(
+      client.sendMessage(chatId, text, { ...SAFE_SEND_OPTS }),
+      30_000,
+      'sendMessage text',
+    );
   } catch (err) {
     logger.warn('client.sendMessage failed — trying page evaluate send', {
       error: errDetail(err),
@@ -234,8 +220,6 @@ export async function sendToWhatsappGroup(text: string, mediaUrl?: string): Prom
     return { success: false, error: 'WhatsApp client not ready' };
   }
 
-  await new Promise((r) => setTimeout(r, 1_500));
-
   const textForGroup = text
     .replace(/^🕐[^\n]*\n\n/, '')
     .replace(/https:\/\/www\.wetrade-il\.com\/home2\n?/g, '')
@@ -246,10 +230,12 @@ export async function sendToWhatsappGroup(text: string, mediaUrl?: string): Prom
     if (!chatId) {
       return {
         success: false,
-        error:
-          `Group "${GROUP_NAME}" not found. Make sure the linked WhatsApp Business number is IN the group, then retry.`,
+        error: 'Missing WHATSAPP_GROUP_ID (or invite) on Railway',
       };
     }
+
+    logger.info('Sending to WhatsApp group…', { chatId, group: GROUP_NAME });
+    await warmGroupChat(chatId);
 
     try {
       await sendOnce(chatId, textForGroup, mediaUrl);
@@ -258,7 +244,7 @@ export async function sendToWhatsappGroup(text: string, mediaUrl?: string): Prom
         error: errDetail(firstErr),
         chatId,
       });
-      await new Promise((r) => setTimeout(r, 2_500));
+      await new Promise((r) => setTimeout(r, 2_000));
       await sendViaPage(chatId, textForGroup);
     }
 
