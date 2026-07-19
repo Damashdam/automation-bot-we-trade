@@ -109,7 +109,14 @@ async function publishPost(
     }
 
     await markMessageApproved(chatId, originalMessageId, originalMessageText);
-    await sendSimpleMessage(chatId, '✅ פורסם לצ\'אט ולוואצאפ!');
+    if (waResult.success) {
+      await sendSimpleMessage(chatId, '✅ פורסם לצ\'אט ולוואצאפ!');
+    } else {
+      await sendSimpleMessage(
+        chatId,
+        `✅ פורסם לצ\'אט\n⚠️ וואטסאפ נכשל: ${waResult.error ?? 'לא מוכן'}\n(בדקו /health → whatsappReady)`,
+      );
+    }
   } else {
     logger.error('Chat post failed', { postId, error: result.error });
     await sendSimpleMessage(chatId, '❌ שגיאה בפרסום: ' + (result.error ?? 'שגיאה לא ידועה'));

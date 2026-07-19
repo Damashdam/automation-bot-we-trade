@@ -46,7 +46,8 @@ const client = new Client({
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
-      ...(headless ? ['--single-process'] : []),
+      '--no-zygote',
+      // Do NOT use --single-process: hangs Chromium on Railway and blocks /health
     ],
   },
 });

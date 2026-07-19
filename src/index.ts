@@ -25,17 +25,21 @@ async function main(): Promise<void> {
   }
 
   await bootstrapDataFromEnv();
+  // Health first so Railway probes stay up while Chromium boots
   startHealthServer();
-
-  waClient.initialize().catch((err: Error) => {
-    logger.error('WhatsApp init failed', { error: err.message });
-  });
 
   startCallbackHandler().catch((err: Error) => {
     logger.error('Callback handler crashed', { error: err.message });
   });
 
-  // Run once immediately on startup so we don't wait for the first cron tick
+  // Init WhatsApp before the first scrape storm (Chromium needs CPU/RAM)
+  try {
+    await waClient.initialize();
+  } catch (err) {
+    logger.error('WhatsApp init failed', { error: (err as Error).message });
+  }
+
+  // Run once after WA has had a chance to become ready
   await runMonitorJob();
 
   const cronExpression = `*/${CHECK_INTERVAL} * * * *`;
