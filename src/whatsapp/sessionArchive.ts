@@ -8,27 +8,58 @@ export const SESSION_DIR = path.join(DATA_DIR, 'wa-session');
 export const SESSION_MARKER = path.join(SESSION_DIR, 'session');
 export const SESSION_ARCHIVE = path.join(DATA_DIR, 'wa-session.tar.gz');
 
-const TAR_EXCLUDES = [
-  '--exclude=**/Cache',
-  '--exclude=**/Code Cache',
-  '--exclude=**/GPUCache',
-  '--exclude=**/Service Worker',
-  '--exclude=**/blob_storage',
-  '--exclude=**/GraphiteDawnCache',
-  '--exclude=**/BrowserMetrics*',
-  '--exclude=**/Crashpad',
-];
-
-/** Pack local session to data/wa-session.tar.gz (argv form so spaces in excludes work). */
+/**
+ * Pack only auth-critical Chromium files (~2–5 MB) so Railway upload doesn't hang.
+ * Full profile is ~200MB and often fails over HTTP.
+ */
 export function packSessionToTarGz(outPath: string = SESSION_ARCHIVE): string {
   if (!fs.existsSync(SESSION_MARKER)) {
     throw new Error(`No session at ${SESSION_MARKER}`);
   }
-  execFileSync(
-    'tar',
-    [...TAR_EXCLUDES, '-czf', outPath, '-C', DATA_DIR, 'wa-session'],
-    { stdio: 'inherit' },
-  );
+
+  const staging = path.join(DATA_DIR, '.wa-session-pack');
+  const stagedSession = path.join(staging, 'wa-session', 'session');
+  fs.rmSync(staging, { recursive: true, force: true });
+  fs.mkdirSync(stagedSession, { recursive: true });
+
+  const srcRoot = SESSION_MARKER;
+  const include = [
+    'Local State',
+    'Last Version',
+    path.join('Default', 'IndexedDB'),
+    path.join('Default', 'Local Storage'),
+    path.join('Default', 'Session Storage'),
+    path.join('Default', 'Cookies'),
+    path.join('Default', 'Cookies-journal'),
+    path.join('Default', 'Preferences'),
+    path.join('Default', 'Secure Preferences'),
+    path.join('Default', 'Network Persistent State'),
+  ];
+
+  for (const rel of include) {
+    const from = path.join(srcRoot, rel);
+    if (!fs.existsSync(from)) continue;
+    const to = path.join(stagedSession, rel);
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    execFileSync('cp', ['-R', from, to], { stdio: 'pipe' });
+  }
+
+  // Drop huge IndexedDB blob dirs if present (auth lives in leveldb)
+  const dropBlobs = (dir: string) => {
+    if (!fs.existsSync(dir)) return;
+    for (const name of fs.readdirSync(dir)) {
+      const p = path.join(dir, name);
+      const st = fs.statSync(p);
+      if (st.isDirectory()) {
+        if (name.endsWith('.indexeddb.blob')) fs.rmSync(p, { recursive: true, force: true });
+        else dropBlobs(p);
+      }
+    }
+  };
+  dropBlobs(stagedSession);
+
+  execFileSync('tar', ['-czf', outPath, '-C', staging, 'wa-session'], { stdio: 'inherit' });
+  fs.rmSync(staging, { recursive: true, force: true });
   return outPath;
 }
 

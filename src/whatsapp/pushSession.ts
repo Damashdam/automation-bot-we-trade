@@ -6,8 +6,7 @@
  */
 import 'dotenv/config';
 import fs from 'fs';
-import https from 'https';
-import http from 'http';
+import { execFileSync } from 'child_process';
 import { packSessionToTarGz, SESSION_ARCHIVE, SESSION_MARKER } from './sessionArchive';
 
 function pack(): void {
@@ -19,51 +18,42 @@ function pack(): void {
   }
 
   packSessionToTarGz(SESSION_ARCHIVE);
-  console.log(
-    `Packed ${SESSION_ARCHIVE} (${(fs.statSync(SESSION_ARCHIVE).size / 1024 / 1024).toFixed(1)} MB)`,
-  );
+  const mb = (fs.statSync(SESSION_ARCHIVE).size / 1024 / 1024).toFixed(1);
+  console.log(`Packed ${SESSION_ARCHIVE} (${mb} MB)`);
 }
 
-function upload(urlBase: string, token: string): Promise<void> {
-  const target = new URL('/wa-session-upload', urlBase.replace(/\/$/, ''));
-  const body = fs.readFileSync(SESSION_ARCHIVE);
-  const lib = target.protocol === 'https:' ? https : http;
-
-  return new Promise((resolve, reject) => {
-    const req = lib.request(
-      {
-        method: 'POST',
-        hostname: target.hostname,
-        port: target.port || (target.protocol === 'https:' ? 443 : 80),
-        path: target.pathname,
-        headers: {
-          'Content-Type': 'application/gzip',
-          'Content-Length': body.length,
-          'X-Upload-Token': token,
-        },
-        timeout: 600_000,
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8');
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-            console.log('Upload OK:', text);
-            resolve();
-          } else {
-            reject(new Error(`HTTP ${res.statusCode}: ${text}`));
-          }
-        });
-      },
+function uploadWithCurl(urlBase: string, token: string): void {
+  const target = `${urlBase.replace(/\/$/, '')}/wa-session-upload`;
+  console.log(`Uploading to ${target} …`);
+  try {
+    const out = execFileSync(
+      'curl',
+      [
+        '-sS',
+        '-f',
+        '--max-time',
+        '300',
+        '-X',
+        'POST',
+        '-H',
+        `X-Upload-Token: ${token}`,
+        '-H',
+        'Content-Type: application/gzip',
+        '--data-binary',
+        `@${SESSION_ARCHIVE}`,
+        target,
+      ],
+      { encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 },
     );
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
+    console.log('Upload OK:', out.trim());
+  } catch (err) {
+    const e = err as { status?: number; stderr?: Buffer; stdout?: Buffer; message?: string };
+    const detail = [e.stdout?.toString(), e.stderr?.toString(), e.message].filter(Boolean).join('\n');
+    throw new Error(`Upload failed.\n${detail}\n\nCheck: WA_UPLOAD_TOKEN on Railway matches, and Volume is /app/data`);
+  }
 }
 
-async function main(): Promise<void> {
+function main(): void {
   const botUrl =
     process.env.WA_BOT_URL?.trim() ||
     'https://automation-bot-we-trade-production.up.railway.app';
@@ -74,12 +64,13 @@ async function main(): Promise<void> {
   }
 
   pack();
-  console.log(`Uploading to ${botUrl}/wa-session-upload …`);
-  await upload(botUrl, token);
-  console.log('Done. Watch Railway logs for "WhatsApp client ready" after restart.');
+  uploadWithCurl(botUrl, token);
+  console.log('Done. Watch Railway logs for "WhatsApp client ready" (not QR).');
 }
 
-main().catch((err) => {
+try {
+  main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

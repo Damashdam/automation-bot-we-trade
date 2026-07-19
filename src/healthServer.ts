@@ -21,35 +21,61 @@ const MAX_UPLOAD_BYTES = 120 * 1024 * 1024;
 function handleSessionUpload(req: http.IncomingMessage, res: http.ServerResponse): void {
   const expected = process.env.WA_UPLOAD_TOKEN?.trim();
   if (!expected || req.headers['x-upload-token'] !== expected) {
+    logger.warn('WA session upload rejected — bad or missing WA_UPLOAD_TOKEN');
     res.writeHead(401, { 'Content-Type': 'text/plain' });
     res.end('Unauthorized — set WA_UPLOAD_TOKEN and send X-Upload-Token header');
     return;
   }
 
+  logger.info('WA session upload started', {
+    contentLength: req.headers['content-length'] || 'unknown',
+  });
+
   const tmp = path.join(DATA_DIR, 'wa-session-upload.tar.gz');
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const ws = fs.createWriteStream(tmp);
   let size = 0;
+  let settled = false;
+
+  const fail = (code: number, msg: string) => {
+    if (settled) return;
+    settled = true;
+    try {
+      ws.destroy();
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
+    if (!res.headersSent) {
+      res.writeHead(code, { 'Content-Type': 'text/plain' });
+      res.end(msg);
+    }
+  };
 
   req.on('data', (chunk: Buffer) => {
     size += chunk.length;
     if (size > MAX_UPLOAD_BYTES) {
+      fail(413, 'Upload too large');
       req.destroy();
-      ws.destroy();
-      try {
-        fs.unlinkSync(tmp);
-      } catch {
-        /* ignore */
-      }
-      res.writeHead(413, { 'Content-Type': 'text/plain' });
-      res.end('Upload too large');
     }
+  });
+
+  req.on('aborted', () => {
+    logger.warn('WA session upload aborted by client');
+    fail(400, 'Upload aborted');
   });
 
   req.pipe(ws);
 
   ws.on('finish', () => {
+    if (settled) return;
+    settled = true;
     try {
+      logger.info('WA session upload received', { bytes: size });
       restoreSessionFromTarGz(tmp);
       try {
         fs.unlinkSync(tmp);
@@ -57,22 +83,21 @@ function handleSessionUpload(req: http.IncomingMessage, res: http.ServerResponse
         /* ignore */
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, message: 'Session saved — process will restart' }));
+      res.end(JSON.stringify({ ok: true, message: 'Session saved — process will restart', bytes: size }));
       logger.info('WA session uploaded via /wa-session-upload — exiting for clean re-init');
       setTimeout(() => process.exit(0), 500);
     } catch (err) {
       logger.error('WA session upload extract failed', { error: (err as Error).message });
-      res.writeHead(400, { 'Content-Type': 'text/plain' });
-      res.end('Extract failed: ' + (err as Error).message);
+      if (!res.headersSent) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Extract failed: ' + (err as Error).message);
+      }
     }
   });
 
   ws.on('error', (err) => {
     logger.error('WA session upload write failed', { error: err.message });
-    if (!res.headersSent) {
-      res.writeHead(500, { 'Content-Type': 'text/plain' });
-      res.end(err.message);
-    }
+    fail(500, err.message);
   });
 }
 
