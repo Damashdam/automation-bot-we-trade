@@ -13,8 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-ENV NODE_ENV=production \
-    WA_HEADLESS=true \
+ENV WA_HEADLESS=true \
     CHROME_PATH=/usr/bin/chromium \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     PUPPETEER_SKIP_DOWNLOAD=true \
@@ -25,13 +24,15 @@ ENV NODE_ENV=production \
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+# Need devDependencies (@types/*, typescript) for tsc
+RUN npm ci
 
-# Playwright browsers not needed if we point to system Chromium;
-# still install the node package (already in npm ci).
 COPY tsconfig.json ./
 COPY src ./src
-RUN npm install typescript --no-save && npx tsc && npm uninstall typescript
+RUN npx tsc \
+    && npm prune --omit=dev
+
+ENV NODE_ENV=production
 
 RUN mkdir -p /app/data /app/logs \
     && chown -R node:node /app
