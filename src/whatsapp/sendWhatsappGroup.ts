@@ -2,11 +2,12 @@ import { MessageMedia } from 'whatsapp-web.js';
 import client, { isClientReady } from './waClient';
 import logger from '../utils/logger';
 
-const GROUP_NAME = process.env.WHATSAPP_GROUP_NAME || '';
+const GROUP_NAME = (process.env.WHATSAPP_GROUP_NAME || '').trim();
 const GROUP_ID = (process.env.WHATSAPP_GROUP_ID || '').trim();
-const GROUP_INVITE_URL =
+const GROUP_INVITE_URL = (
   process.env.WHATSAPP_GROUP_INVITE_URL ||
-  'https://chat.whatsapp.com/JUDZ3Tz9cdXKzx9y96s0Y1?s=cl&p=i&ilr=0';
+  'https://chat.whatsapp.com/JUDZ3Tz9cdXKzx9y96s0Y1?s=cl&p=i&ilr=0'
+).trim();
 
 export interface WaGroupSendResult {
   success: boolean;
@@ -24,11 +25,6 @@ function errDetail(err: unknown): string {
   } catch {
     return String(err);
   }
-}
-
-function inviteCodeFromUrl(url: string): string | null {
-  const m = url.match(/chat\.whatsapp\.com\/([A-Za-z0-9]+)/);
-  return m?.[1] ?? null;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -59,74 +55,73 @@ async function waitForReady(timeoutMs = 45_000): Promise<boolean> {
   return false;
 }
 
-/** Warm the group chat in WA Store — without this, sendMessage often hangs forever. */
-async function warmGroupChat(chatId: string): Promise<void> {
-  const code = inviteCodeFromUrl(GROUP_INVITE_URL);
-  if (code) {
-    try {
-      await withTimeout(client.getInviteInfo(code), 12_000, 'getInviteInfo');
-    } catch (err) {
-      logger.warn('getInviteInfo warm failed', { error: errDetail(err) });
-    }
-    try {
-      const joined = await withTimeout(client.acceptInvite(code), 15_000, 'acceptInvite');
-      logger.info('Group warm via acceptInvite', { joined });
-    } catch (err) {
-      logger.warn('acceptInvite warm failed (often OK if already member)', {
-        error: errDetail(err),
-      });
-    }
-  }
-
-  try {
-    const page = (client as unknown as { pupPage?: { evaluate: Function } }).pupPage;
-    if (page) {
-      await withTimeout(
-        page.evaluate(async (id: string) => {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const w = window as any;
-          if (w.WWebJS?.getChat) {
-            await w.WWebJS.getChat(id, { getAsModel: false });
-          }
-        }, chatId),
-        12_000,
-        'getChat warm',
-      );
-    }
-  } catch (err) {
-    logger.warn('getChat warm failed', { error: errDetail(err) });
-  }
-}
-
-async function resolveGroupChatId(): Promise<string | null> {
-  if (GROUP_ID) return GROUP_ID;
-
-  const code = inviteCodeFromUrl(GROUP_INVITE_URL);
-  if (code) {
-    try {
-      const info = (await withTimeout(client.getInviteInfo(code), 15_000, 'getInviteInfo')) as {
-        id?: string | { _serialized?: string };
-      };
-      const id =
-        typeof info?.id === 'string' ? info.id : info?.id?._serialized ?? null;
-      if (id) return id;
-    } catch (err) {
-      logger.warn('Could not resolve group from invite', { error: errDetail(err) });
-    }
-  }
-
-  if (GROUP_NAME) {
-    logger.error('Set WHATSAPP_GROUP_ID in Railway — required for reliable sends', {
-      groupName: GROUP_NAME,
-    });
-  }
-  return null;
-}
-
 const SAFE_SEND_OPTS = {
   sendSeen: false,
   linkPreview: false,
 } as const;
+
+/**
+ * Send via raw WhatsApp Store — avoids wwebjs helpers that hang when Store sync is empty.
+ */
+async function sendViaStore(chatId: string, text: string): Promise<void> {
+  const page = (client as unknown as { pupPage?: { evaluate: Function } }).pupPage;
+  if (!page) throw new Error('WhatsApp pupPage not available');
+
+  const result = (await withTimeout(
+    page.evaluate(
+      async (id: string, body: string) => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const w = window as any;
+          const chat =
+            w.Store?.Chat?.get?.(id) ||
+            w.Store?.Chat?.get?.(w.Store?.WidFactory?.createWid?.(id));
+          if (!chat) {
+            // Create a chat model stub for known group id (same approach as opening by id)
+            try {
+              const wid = w.Store?.WidFactory?.createWid?.(id);
+              if (wid && w.Store?.Chat?.find) {
+                const found = await w.Store.Chat.find(wid);
+                if (found) {
+                  await w.Store.SendMessage.sendTextMsgToChat(found, body);
+                  return { ok: true };
+                }
+              }
+            } catch (e) {
+              return {
+                ok: false,
+                error: e instanceof Error ? e.message : String(e),
+              };
+            }
+            return { ok: false, error: 'chat_not_in_store' };
+          }
+          if (w.Store?.SendMessage?.sendTextMsgToChat) {
+            await w.Store.SendMessage.sendTextMsgToChat(chat, body);
+            return { ok: true };
+          }
+          if (w.WWebJS?.sendMessage) {
+            await w.WWebJS.sendMessage(chat, body, { linkPreview: false });
+            return { ok: true };
+          }
+          return { ok: false, error: 'no_send_api' };
+        } catch (e) {
+          return {
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          };
+        }
+      },
+      chatId,
+      text,
+    ),
+    20_000,
+    'sendViaStore',
+  )) as { ok: boolean; error?: string };
+
+  if (!result?.ok) {
+    throw new Error(result?.error || 'sendViaStore failed');
+  }
+}
 
 async function sendViaPage(chatId: string, text: string): Promise<void> {
   const page = (client as unknown as { pupPage?: { evaluate: Function } }).pupPage;
@@ -164,12 +159,37 @@ async function sendViaPage(chatId: string, text: string): Promise<void> {
   }
 }
 
+async function sendText(chatId: string, text: string): Promise<void> {
+  // 1) Direct API (worked locally with GROUP_ID)
+  try {
+    await withTimeout(
+      client.sendMessage(chatId, text, { ...SAFE_SEND_OPTS }),
+      20_000,
+      'sendMessage',
+    );
+    return;
+  } catch (err) {
+    logger.warn('sendMessage failed', { error: errDetail(err) });
+  }
+
+  // 2) Store path
+  try {
+    await sendViaStore(chatId, text);
+    return;
+  } catch (err) {
+    logger.warn('sendViaStore failed', { error: errDetail(err) });
+  }
+
+  // 3) WWebJS helpers
+  await sendViaPage(chatId, text);
+}
+
 async function sendOnce(chatId: string, text: string, mediaUrl?: string): Promise<void> {
   if (mediaUrl) {
     try {
       const media = await withTimeout(
         MessageMedia.fromUrl(mediaUrl, { unsafeMime: true }),
-        20_000,
+        15_000,
         'MessageMedia.fromUrl',
       );
       await withTimeout(
@@ -177,7 +197,7 @@ async function sendOnce(chatId: string, text: string, mediaUrl?: string): Promis
           ...SAFE_SEND_OPTS,
           caption: text,
         }),
-        30_000,
+        25_000,
         'sendMessage media',
       );
       return;
@@ -188,18 +208,7 @@ async function sendOnce(chatId: string, text: string, mediaUrl?: string): Promis
     }
   }
 
-  try {
-    await withTimeout(
-      client.sendMessage(chatId, text, { ...SAFE_SEND_OPTS }),
-      30_000,
-      'sendMessage text',
-    );
-  } catch (err) {
-    logger.warn('client.sendMessage failed — trying page evaluate send', {
-      error: errDetail(err),
-    });
-    await sendViaPage(chatId, text);
-  }
+  await sendText(chatId, text);
 }
 
 export async function sendToWhatsappGroup(text: string, mediaUrl?: string): Promise<WaGroupSendResult> {
@@ -211,7 +220,7 @@ export async function sendToWhatsappGroup(text: string, mediaUrl?: string): Prom
     return { success: true };
   }
 
-  if (!GROUP_NAME && !GROUP_ID && !GROUP_INVITE_URL) {
+  if (!GROUP_ID && !GROUP_NAME && !GROUP_INVITE_URL) {
     throw new Error('Missing WHATSAPP_GROUP_NAME / WHATSAPP_GROUP_ID / invite URL');
   }
 
@@ -220,37 +229,25 @@ export async function sendToWhatsappGroup(text: string, mediaUrl?: string): Prom
     return { success: false, error: 'WhatsApp client not ready' };
   }
 
+  if (!GROUP_ID) {
+    return {
+      success: false,
+      error: 'Missing WHATSAPP_GROUP_ID on Railway (required)',
+    };
+  }
+
   const textForGroup = text
     .replace(/^🕐[^\n]*\n\n/, '')
     .replace(/https:\/\/www\.wetrade-il\.com\/home2\n?/g, '')
     .replace(/לא המלצה לפעולה/, `${GROUP_INVITE_URL}\nלא המלצה לפעולה`);
 
   try {
-    const chatId = await resolveGroupChatId();
-    if (!chatId) {
-      return {
-        success: false,
-        error: 'Missing WHATSAPP_GROUP_ID (or invite) on Railway',
-      };
-    }
-
-    logger.info('Sending to WhatsApp group…', { chatId, group: GROUP_NAME });
-    await warmGroupChat(chatId);
-
-    try {
-      await sendOnce(chatId, textForGroup, mediaUrl);
-    } catch (firstErr) {
-      logger.warn('WhatsApp send failed — retrying text-only via page', {
-        error: errDetail(firstErr),
-        chatId,
-      });
-      await new Promise((r) => setTimeout(r, 2_000));
-      await sendViaPage(chatId, textForGroup);
-    }
-
+    // No invite/getChat warm — those hang when Store sync is empty on Railway.
+    logger.info('Sending to WhatsApp group…', { chatId: GROUP_ID, group: GROUP_NAME });
+    await sendOnce(GROUP_ID, textForGroup, mediaUrl);
     logger.info('Message sent to WhatsApp group', {
-      group: GROUP_NAME || chatId,
-      chatId,
+      group: GROUP_NAME || GROUP_ID,
+      chatId: GROUP_ID,
     });
     return { success: true };
   } catch (err) {
