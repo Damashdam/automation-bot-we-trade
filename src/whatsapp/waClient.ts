@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import QRCode from 'qrcode';
+import qrcodeTerminal from 'qrcode-terminal';
 import path from 'path';
 import fs from 'fs';
 import logger from '../utils/logger';
@@ -21,10 +22,23 @@ const chromePath =
     ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
     : undefined);
 
+const phoneDigits = (process.env.WHATSAPP_PHONE_NUMBER || '').replace(/\D/g, '');
+const usePairing =
+  process.env.WA_USE_PAIRING_CODE === 'true' && phoneDigits.length >= 10;
+
 fs.mkdirSync(SESSION_DIR, { recursive: true });
 
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: SESSION_DIR }),
+  ...(usePairing
+    ? {
+        pairWithPhoneNumber: {
+          phoneNumber: phoneDigits,
+          showNotification: true,
+          intervalMs: 180_000,
+        },
+      }
+    : {}),
   puppeteer: {
     headless,
     ...(chromePath ? { executablePath: chromePath } : {}),
@@ -39,8 +53,10 @@ const client = new Client({
 });
 
 let ready = false;
-let lastQrAt = 0;
+let latestQrPayload: string | null = null;
 let latestQrDataUrl: string | null = null;
+let latestPairingCode: string | null = null;
+let lastQrAt = 0;
 
 export function isClientReady(): boolean {
   return ready;
@@ -50,38 +66,71 @@ export function getLatestQrDataUrl(): string | null {
   return latestQrDataUrl;
 }
 
+export function getLatestPairingCode(): string | null {
+  return latestPairingCode;
+}
+
 export function getQrPngPath(): string {
   return QR_PNG;
 }
 
+export function getLastQrAt(): number {
+  return lastQrAt;
+}
+
+function clearQrArtifacts(): void {
+  latestQrPayload = null;
+  latestQrDataUrl = null;
+  latestPairingCode = null;
+  try {
+    if (fs.existsSync(QR_PNG)) fs.unlinkSync(QR_PNG);
+  } catch {
+    /* ignore */
+  }
+}
+
 client.on('qr', async (qr) => {
-  const now = Date.now();
-  if (now - lastQrAt < 20_000) return;
-  lastQrAt = now;
+  latestQrPayload = qr;
+  lastQrAt = Date.now();
+  ready = false;
 
   try {
-    await QRCode.toFile(QR_PNG, qr, { width: 512, margin: 2 });
-    latestQrDataUrl = await QRCode.toDataURL(qr, { width: 512, margin: 2 });
-    logger.warn('WhatsApp QR ready — scan from Business Linked devices');
-    logger.warn(`QR also at ${QR_PNG} (and /wa-qr on health server if enabled)`);
+    latestQrDataUrl = await QRCode.toDataURL(qr, {
+      width: 512,
+      margin: 2,
+      errorCorrectionLevel: 'M',
+    });
+    await QRCode.toFile(QR_PNG, qr, { width: 512, margin: 2, errorCorrectionLevel: 'M' });
+    // ASCII in logs — scan from Railway logs if needed (not the stale PNG file)
+    qrcodeTerminal.generate(qr, { small: true });
+    logger.warn('WhatsApp QR refreshed — open /wa-qr in browser and scan with camera (Linked devices)');
   } catch (err) {
-    logger.warn('Could not write QR PNG', { error: (err as Error).message });
+    logger.warn('Could not render QR', { error: (err as Error).message });
   }
 });
 
+client.on('code', (code: string) => {
+  latestPairingCode = code;
+  logger.warn('══════════════════════════════════════');
+  logger.warn(`WhatsApp PAIRING CODE: ${code}`);
+  logger.warn('Enter it on the phone if Business shows Link with phone number');
+  logger.warn('══════════════════════════════════════');
+});
+
 client.on('authenticated', () => {
-  latestQrDataUrl = null;
+  clearQrArtifacts();
   logger.info('WhatsApp authenticated');
 });
 
 client.on('ready', () => {
   ready = true;
-  latestQrDataUrl = null;
+  clearQrArtifacts();
   logger.info('WhatsApp client ready');
 });
 
 client.on('auth_failure', (msg) => {
   ready = false;
+  clearQrArtifacts();
   logger.error('WhatsApp auth failed', { msg });
 });
 
@@ -94,5 +143,11 @@ client.on('disconnected', (reason) => {
     });
   }, 8_000);
 });
+
+if (usePairing) {
+  logger.info('WhatsApp auth: pairing-code mode', { phone: phoneDigits });
+} else {
+  logger.info('WhatsApp auth: QR / existing session (set WA_USE_PAIRING_CODE=true only if phone supports it)');
+}
 
 export default client;

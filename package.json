@@ -12,6 +12,7 @@
     "test:fetch": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' ts-node src/index.ts --test",
     "auth": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' ts-node src/scraper/auth.ts",
     "wa:test": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' ts-node src/whatsapp/testSend.ts",
+    "wa:pack-session": "NODE_OPTIONS='--disable-warning=ExperimentalWarning' ts-node src/whatsapp/exportSession.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {

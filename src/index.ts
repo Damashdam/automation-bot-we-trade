@@ -24,7 +24,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  bootstrapDataFromEnv();
+  await bootstrapDataFromEnv();
   startHealthServer();
 
   waClient.initialize().catch((err: Error) => {

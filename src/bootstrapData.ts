@@ -1,14 +1,87 @@
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
+import https from 'https';
+import http from 'http';
 import logger from './utils/logger';
 
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(process.cwd(), 'data'));
+const SESSION_DIR = path.join(DATA_DIR, 'wa-session');
+const SESSION_MARKER = path.join(SESSION_DIR, 'session');
+
+function downloadFile(url: string, dest: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    const lib = url.startsWith('https') ? https : http;
+    const req = lib.get(url, (res) => {
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        file.close();
+        fs.unlinkSync(dest);
+        downloadFile(res.headers.location, dest).then(resolve).catch(reject);
+        return;
+      }
+      if (res.statusCode !== 200) {
+        file.close();
+        fs.unlinkSync(dest);
+        reject(new Error(`Download failed HTTP ${res.statusCode}`));
+        return;
+      }
+      res.pipe(file);
+      file.on('finish', () => file.close(() => resolve()));
+    });
+    req.on('error', (err) => {
+      try {
+        fs.unlinkSync(dest);
+      } catch {
+        /* ignore */
+      }
+      reject(err);
+    });
+  });
+}
+
+async function bootstrapWaSessionFromUrl(): Promise<void> {
+  const url = process.env.WA_SESSION_URL?.trim();
+  if (!url) return;
+
+  const force = process.env.WA_SESSION_FORCE === 'true';
+  if (fs.existsSync(SESSION_MARKER) && !force) {
+    logger.info('WhatsApp session already present — skip WA_SESSION_URL');
+    return;
+  }
+
+  const tmp = path.join(DATA_DIR, 'wa-session-download.tar.gz');
+  try {
+    logger.info('Downloading WhatsApp session from WA_SESSION_URL…');
+    await downloadFile(url, tmp);
+    if (force && fs.existsSync(SESSION_DIR)) {
+      fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+    }
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    execSync(`tar -xzf "${tmp}" -C "${DATA_DIR}"`, { stdio: 'pipe' });
+    if (!fs.existsSync(SESSION_MARKER)) {
+      throw new Error('Archive did not contain wa-session/session');
+    }
+    logger.info('WhatsApp session restored from WA_SESSION_URL');
+  } catch (err) {
+    logger.error('Failed to bootstrap WA session from URL', {
+      error: (err as Error).message,
+    });
+  } finally {
+    try {
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
+  }
+}
 
 /**
  * Bootstrap files into DATA_DIR from Railway Variables when the volume is empty.
  * - X_COOKIES_BASE64: base64 of data/x-cookies.json
+ * - WA_SESSION_URL: URL to wa-session.tar.gz (from npm run wa:pack-session)
  */
-export function bootstrapDataFromEnv(): void {
+export async function bootstrapDataFromEnv(): Promise<void> {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 
   const cookiesPath = path.join(DATA_DIR, 'x-cookies.json');
@@ -28,4 +101,6 @@ export function bootstrapDataFromEnv(): void {
   } else if (!fs.existsSync(cookiesPath)) {
     logger.warn('No x-cookies.json yet — set X_COOKIES_BASE64 in Railway or upload the file to /app/data');
   }
+
+  await bootstrapWaSessionFromUrl();
 }
