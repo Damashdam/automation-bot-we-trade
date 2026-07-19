@@ -37,11 +37,13 @@ ENV NODE_ENV=production
 RUN mkdir -p /app/data /app/logs \
     && chown -R node:node /app
 
-USER node
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
 
+# Start as root so entrypoint can chown the Railway volume, then drop to node
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8080/health || exit 1
 
-CMD ["node", "--disable-warning=ExperimentalWarning", "dist/index.js"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
