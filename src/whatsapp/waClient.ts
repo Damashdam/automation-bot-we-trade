@@ -46,6 +46,8 @@ logger.info('WhatsApp browser', {
 
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: SESSION_DIR }),
+  authTimeoutMs: 45_000,
+  qrMaxRetries: 0,
   ...(usePairing
     ? {
         pairWithPhoneNumber: {
@@ -75,12 +77,13 @@ let everAuthenticated = false;
 let latestQrDataUrl: string | null = null;
 let latestPairingCode: string | null = null;
 let lastQrAt = 0;
-let lastProgressAt = Date.now();
+/** Absolute clock: reset only on QR / ready / recover — NOT on loading_screen. */
+let noLinkSince = Date.now();
 let recovering = false;
 let watchdogStarted = false;
 
-function markProgress(): void {
-  lastProgressAt = Date.now();
+function noteLinkedOrQr(): void {
+  noLinkSince = Date.now();
 }
 
 function sleep(ms: number): Promise<void> {
@@ -215,7 +218,7 @@ async function captureNativeQrImage(): Promise<Buffer | null> {
 client.on('qr', async (qr) => {
   lastQrAt = Date.now();
   ready = false;
-  markProgress();
+  noteLinkedOrQr();
 
   try {
     await sleep(400);
@@ -241,25 +244,24 @@ client.on('qr', async (qr) => {
 
 client.on('code', (code: string) => {
   latestPairingCode = code;
-  markProgress();
+  noteLinkedOrQr();
   logger.warn(`WhatsApp PAIRING CODE: ${code}`);
 });
 
 client.on('authenticated', () => {
   everAuthenticated = true;
-  markProgress();
   clearQrArtifacts();
   logger.info('WhatsApp authenticated');
 });
 
 client.on('loading_screen', (percent: number | string) => {
-  markProgress();
+  // Do NOT reset stuck timer — loading can loop forever on a dead session
   logger.info('WhatsApp loading', { percent });
 });
 
 client.on('ready', () => {
   everAuthenticated = true;
-  markProgress();
+  noteLinkedOrQr();
   // Soft settle only — do NOT call inject() here (blocks / races QR & boot)
   setTimeout(() => {
     void (async () => {
@@ -305,6 +307,20 @@ function scheduleReinit(delayMs: number): void {
   }, delayMs);
 }
 
+async function initWithTimeout(ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    await Promise.race([
+      client.initialize(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`initialize timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function hardRecover(clearSession: boolean, delayMs: number): Promise<void> {
   if (recovering) return;
   recovering = true;
@@ -313,7 +329,7 @@ async function hardRecover(clearSession: boolean, delayMs: number): Promise<void
     if (delayMs > 0) await sleep(delayMs);
     logger.warn('WhatsApp hard recover', { clearSession });
     try {
-      await client.destroy();
+      await Promise.race([client.destroy(), sleep(10_000)]);
     } catch {
       /* ignore */
     }
@@ -322,15 +338,20 @@ async function hardRecover(clearSession: boolean, delayMs: number): Promise<void
       everAuthenticated = false;
     }
     clearQrArtifacts();
-    markProgress();
-    await client.initialize();
+    noLinkSince = Date.now();
+    await initWithTimeout(60_000);
   } catch (err) {
     logger.error('WhatsApp hard recover failed', { error: (err as Error).message });
+    try {
+      await Promise.race([client.destroy(), sleep(5_000)]);
+    } catch {
+      /* ignore */
+    }
+    if (clearSession) clearSessionFiles();
+    scheduleReinit(12_000);
+  } finally {
     recovering = false;
-    scheduleReinit(15_000);
-    return;
   }
-  recovering = false;
 }
 
 client.on('disconnected', (reason) => {
@@ -348,27 +369,49 @@ client.on('disconnected', (reason) => {
   scheduleReinit(8_000);
 });
 
+/** Manual relink: clear session + restart Chromium (token-protected HTTP). */
+export async function forceWhatsAppRelink(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await hardRecover(true, 0);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+export function getWhatsAppDiag(): {
+  recovering: boolean;
+  noLinkSec: number;
+  hasSessionDir: boolean;
+} {
+  return {
+    recovering,
+    noLinkSec: Math.floor((Date.now() - noLinkSince) / 1000),
+    hasSessionDir: fs.existsSync(path.join(SESSION_DIR, 'session')),
+  };
+}
+
 /**
  * If Chromium boots into a dead session (no ready, no QR), clear and re-link.
- * Call once after the first initialize() attempt.
  */
 export function startWhatsAppWatchdog(): void {
   if (watchdogStarted) return;
   watchdogStarted = true;
-  markProgress();
+  noLinkSince = Date.now();
 
   setInterval(() => {
     void (async () => {
       if (recovering || ready) return;
       if (latestQrDataUrl || latestPairingCode) return; // waiting for user scan
-      if (Date.now() - lastProgressAt < 75_000) return;
+      // Absolute 60s without QR/ready — ignore loading_screen chatter
+      if (Date.now() - noLinkSince < 60_000) return;
 
       logger.error(
-        'WhatsApp stuck with no ready/QR for 75s — clearing session so /wa-qr can appear',
+        'WhatsApp stuck with no ready/QR for 60s — clearing session so /wa-qr can appear',
       );
       await hardRecover(true, 0);
     })();
-  }, 20_000);
+  }, 10_000);
 }
 
 if (usePairing) {

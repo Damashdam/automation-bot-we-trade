@@ -9,6 +9,8 @@ import {
   getLatestQrDataUrl,
   getLatestPairingCode,
   getLastQrAt,
+  getWhatsAppDiag,
+  forceWhatsAppRelink,
 } from './whatsapp/waClient';
 import { DATA_DIR, restoreSessionFromTarGz } from './whatsapp/sessionArchive';
 
@@ -133,9 +135,25 @@ export function startHealthServer(): void {
       return;
     }
 
+    if (url === '/wa-reset' && req.method === 'POST') {
+      if (!uploadTokenOk(req.headers['x-upload-token'])) {
+        res.writeHead(401, { 'Content-Type': 'text/plain' });
+        res.end('Unauthorized');
+        return;
+      }
+      void (async () => {
+        logger.warn('POST /wa-reset — forcing WhatsApp relink');
+        const result = await forceWhatsAppRelink();
+        res.writeHead(result.ok ? 200 : 500, { 'Content-Type': 'application/json', ...NO_CACHE });
+        res.end(JSON.stringify(result));
+      })();
+      return;
+    }
+
     if (url === '/health' || url === '/') {
       void (async () => {
         const wwebjs = await probeWWebJS();
+        const diag = getWhatsAppDiag();
         const body = JSON.stringify({
           ok: true,
           whatsappReady: isClientReady(),
@@ -144,6 +162,7 @@ export function startHealthServer(): void {
           hasPairingCode: Boolean(getLatestPairingCode()),
           qrAgeSec: getLastQrAt() ? Math.floor((Date.now() - getLastQrAt()) / 1000) : null,
           uptimeSec: Math.floor(process.uptime()),
+          ...diag,
         });
         res.writeHead(200, { 'Content-Type': 'application/json', ...NO_CACHE });
         res.end(body);
@@ -197,7 +216,8 @@ export function startHealthServer(): void {
          <p class="${stale ? 'warn' : 'ok'}">${stale ? 'QR ישן — מתרענן…' : `סרוק עכשיו (${ageSec ?? 0} שנ׳)`}</p>
          <p><b>Business → מכשירים מקושרים → קישור מכשיר → סריקת מצלמה</b><br/>לא צריך מספר צימוד. הדף מתרענן לבד.</p>`
       : `<p>אין QR עדיין…</p>
-         <p>אם יש סשן מקומי שעובד: הרץ <code>npm run wa:pack-session</code> והגדר <code>WA_SESSION_URL</code>.</p>`
+         <p>הבוט מנסה לאפס סשן מת אוטומטית. רעננו בעוד ~דקה.</p>
+         <p>אם נתקע: <code>POST /wa-reset</code> עם header <code>X-Upload-Token</code>.</p>`
   }
 </body>
 </html>`);

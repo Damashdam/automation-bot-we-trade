@@ -35,9 +35,14 @@ async function main(): Promise<void> {
   // Init WhatsApp before the first scrape storm (Chromium needs CPU/RAM)
   startWhatsAppWatchdog();
   try {
-    await waClient.initialize();
+    await Promise.race([
+      waClient.initialize(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('WhatsApp initialize timed out after 90s')), 90_000),
+      ),
+    ]);
   } catch (err) {
-    logger.error('WhatsApp init failed — watchdog will retry', {
+    logger.error('WhatsApp init failed — watchdog will clear session & retry', {
       error: (err as Error).message,
     });
   }
